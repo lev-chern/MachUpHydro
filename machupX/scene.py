@@ -7,13 +7,13 @@ import numpy as np
 import math as m
 import scipy.interpolate as sinterp
 import scipy.optimize as sopt
+import scipy.special as sp
 import matplotlib.pyplot as plt
 
-from stl import mesh
 from mpl_toolkits.mplot3d import Axes3D
 from airfoil_db import DatabaseBoundsError
 
-from machupX.helpers import quat_inv_trans, quat_trans, check_filepath, import_value, quat_mult, quat_conj, quat_to_euler, euler_to_quat
+from machupX.helpers import quat_inv_trans, quat_trans, check_filepath, import_value, quat_mult, quat_conj, quat_to_euler, euler_to_quat, reflect_vector_3d
 from machupX.airplane import Airplane
 from machupX.standard_atmosphere import StandardAtmosphere
 from machupX.exceptions import SolverNotConvergedError, MaxIterationError
@@ -52,7 +52,7 @@ class Scene:
 
         # Set the error handling state
         self.set_err_state()
-
+        
 
     def _load_params(self, scene_input):
         # Loads JSON object and stores input parameters and aircraft
@@ -78,16 +78,16 @@ class Scene:
         self._solver_relaxation = solver_params.get("relaxation", 1.0)
         self._max_solver_iterations = solver_params.get("max_iterations", 100)
 
-        # Aerodynamic parameters
+        # Aerodynamic/hydrodynamic parameters
         self._use_swept_sections = solver_params.get("use_swept_sections", True)
         self._use_total_velocity = solver_params.get("use_total_velocity", True)
         self._use_in_plane = solver_params.get("use_in_plane", True)
         self._match_machup_pro = solver_params.get("match_machup_pro", False)
         self._impingement_threshold = solver_params.get("impingement_threshold", 1e-10)
         self._constrain_vortex_sheet = solver_params.get("constrain_vortex_sheet", False)
-
-        # Store unit system
-        self._unit_sys = self._input_dict.get("units", "English")
+        
+        # Store unit system. Defaults to SI units.
+        self._unit_sys = self._input_dict.get("units", "SI")
 
         # Setup atmospheric property getter functions
         scene_dict = self._input_dict.get("scene", {})
@@ -97,7 +97,16 @@ class Scene:
         self._get_wind = self._initialize_wind_getter(**atmos_dict)
         self._get_viscosity = self._initialize_viscosity_getter(**atmos_dict)
         self._get_sos = self._initialize_sos_getter(**atmos_dict)
-
+        
+        # Boolean to tell whether image and wave vortices should be accounted for in the calculation of induced velocities. Should be used when simulating hydrofoil or ground effect.
+        surface_dict = scene_dict.get("surface_effect_conditions", {})
+        self.has_FS = surface_dict.get("has_free_surface", False)
+        self.FS_plane_normal = surface_dict.get("surf_plane_normal", [0,0,1]) # unit vector normal to free surface, defaults to unit z - [0,0,1].
+        self.FS_height = surface_dict.get("point_on_surface", [0,0,0]) # location of the free surface level. Defaults to body-fixed origin.
+        self.FS_biplane_boundary = surface_dict.get("biplane_BC", False) # true if wishing to use biplane approximation. Else FS is approximated as a rigid wall.
+        self.submergence = surface_dict.get("submergence", 0) # dimensional submergence depth for calculating wavemaking influence. Defaults to 0.
+        self.use_wave_corrections = surface_dict.get("wave_corrections", False) # whether or not to include the induced velocity due to the wave part of the hydrofoil potential. Defaults to false. Currently only dowssournwash (z-component) is computed.
+        
         # Initialize aircraft geometries
         aircraft_dict = scene_dict.get("aircraft", {})
         for key in aircraft_dict:
@@ -109,8 +118,7 @@ class Scene:
 
             # Instantiate
             self.add_aircraft(key, airplane_file, state=state, control_state=control_state)
-
-
+        
     def _initialize_density_getter(self, **kwargs):
 
         # Load value from dictionary
@@ -291,6 +299,7 @@ class Scene:
         # Create and store the aircraft object
         self._airplanes[airplane_name] = Airplane(airplane_name, airplane_input, self._unit_sys, self, init_state=state, init_control_state=control_state, v_wind=v_wind)
 
+
         # Update member variables
         self._N += self._airplanes[airplane_name].N
         self._num_aircraft += 1
@@ -343,7 +352,7 @@ class Scene:
         self._P0_joint = np.zeros((self._N,self._N,3)) # Inbound vortex joint node location
         self._P1 = np.zeros((self._N,self._N,3)) # Outbound vortex node location
         self._P1_joint = np.zeros((self._N,self._N,3)) # Outbound vortex joint node location
-
+        
         # Spatial node vectors and magnitudes
         self._r_0 = np.zeros((self._N,self._N,3))
         self._r_1 = np.zeros((self._N,self._N,3))
@@ -353,7 +362,7 @@ class Scene:
         self._r_0_joint_mag = np.zeros((self._N,self._N))
         self._r_1_mag = np.zeros((self._N,self._N))
         self._r_1_joint_mag = np.zeros((self._N,self._N))
-
+        
         # Spatial node vector magnitude products
         self._r_0_r_0_joint_mag = np.zeros((self._N,self._N))
         self._r_0_r_1_mag = np.zeros((self._N,self._N))
@@ -363,7 +372,7 @@ class Scene:
         self._u_a = np.zeros((self._N,3))
         self._u_n = np.zeros((self._N,3))
         self._u_s = np.zeros((self._N,3))
-
+        
         # Control point atmospheric properties
         self._rho = np.zeros(self._N) # Density
         self._nu = np.zeros(self._N) # Viscosity
@@ -389,10 +398,37 @@ class Scene:
 
         # Misc
         self._diag_ind = np.diag_indices(self._N)
-        self._gamma = np.zeros(self._N)
+        self._gamma = np.zeros(self._N) # circulation
 
         self._solved = False
         
+        # Image storage arrays
+        if self.has_FS:
+            # Image spatial node vectors and magnitudes
+            self._r_0_image = np.zeros((self._N, self._N, 3))
+            self._r_1_image = np.zeros((self._N, self._N, 3))
+            self._r_0_joint_image = np.zeros((self._N, self._N, 3))
+            self._r_1_joint_image = np.zeros((self._N, self._N, 3))
+            self._r_0_mag_image = np.zeros((self._N, self._N))
+            self._r_0_joint_mag_image = np.zeros((self._N, self._N))
+            self._r_1_mag_image = np.zeros((self._N, self._N))
+            self._r_1_joint_mag_image = np.zeros((self._N, self._N))
+
+            # Image spatial node vector magnitude products
+            self._r_0_r_0_joint_mag_image = np.zeros((self._N, self._N))
+            self._r_0_r_1_mag_image = np.zeros((self._N, self._N))
+            self._r_1_r_1_joint_mag_image = np.zeros((self._N, self._N))
+
+            # Image section unit vectors
+            self._u_a_image = np.zeros((self._N, 3))
+            self._u_n_image = np.zeros((self._N, 3))
+            self._u_s_image = np.zeros((self._N, 3))
+                               
+            # Image node locations
+            self._P0_image = np.zeros((self._N,self._N,3))
+            self._P1_image = np.zeros((self._N,self._N,3))
+            self._P0_joint_image = np.zeros((self._N,self._N,3))
+            self._P1_joint_image = np.zeros((self._N,self._N,3))
 
     def _store_aircraft_properties(self):
         # Get properties of the aircraft that don't change with state
@@ -428,6 +464,8 @@ class Scene:
         self._solved = False
 
 
+
+# ********************************************************************
     def _perform_geometry_and_atmos_calcs(self):
         # Performs calculations necessary for solving NLL which are only dependent on geometry.
         # This speeds up repeated calls to _solve(). This method should be called any time the 
@@ -438,11 +476,11 @@ class Scene:
         for airplane_object, airplane_slice in zip(self._airplane_objects, self._airplane_slices):
 
             # Get airplane
-            q = airplane_object.q
-            p = airplane_object.p_bar
+            q = airplane_object.q # orientation
+            p = airplane_object.p_bar # airplane origin
 
             # Get geometries
-            PC = quat_inv_trans(q, airplane_object.PC)
+            PC = quat_inv_trans(q, airplane_object.PC) # control point
             self._r_CG[airplane_slice,:] = quat_inv_trans(q, airplane_object.PC_CG)
             self._PC[airplane_slice,:] = p+PC
             self._dl[airplane_slice,:] = quat_inv_trans(q, airplane_object.dl)
@@ -456,6 +494,12 @@ class Scene:
                 self._u_a[airplane_slice,:] = quat_inv_trans(q, airplane_object.u_a_unswept)
                 self._u_n[airplane_slice,:] = quat_inv_trans(q, airplane_object.u_n_unswept)
                 self._u_s[airplane_slice,:] = quat_inv_trans(q, airplane_object.u_s_unswept)
+            
+            # Calculate image vectors for FS calcs
+            if self.has_FS:
+                self._u_a_image[airplane_slice,:] = reflect_vector_3d(self._u_a[airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                self._u_n_image[airplane_slice,:] = reflect_vector_3d(self._u_n[airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                self._u_s_image[airplane_slice,:] = reflect_vector_3d(self._u_s[airplane_slice,:], self.FS_plane_normal, self.FS_height)
 
             # Node locations
             # Note the first index indicates which control point this is the effective LAC for
@@ -463,7 +507,14 @@ class Scene:
             self._P1[airplane_slice,airplane_slice,:] = p+quat_inv_trans(q, airplane_object.P1_eff)
             self._P0_joint[airplane_slice,airplane_slice,:] = p+quat_inv_trans(q, airplane_object.P0_joint_eff)
             self._P1_joint[airplane_slice,airplane_slice,:] = p+quat_inv_trans(q, airplane_object.P1_joint_eff)
-
+            
+            # Image nodes for this craft
+            if self.has_FS:
+                self._P0_image[airplane_slice,airplane_slice,:] = reflect_vector_3d(self._P0[airplane_slice,airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                self._P1_image[airplane_slice,airplane_slice,:] = reflect_vector_3d(self._P1[airplane_slice,airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                self._P0_joint_image[airplane_slice,airplane_slice,:] = reflect_vector_3d(self._P0_joint[airplane_slice,airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                self._P1_joint_image[airplane_slice,airplane_slice,:] = reflect_vector_3d(self._P1_joint[airplane_slice,airplane_slice,:], self.FS_plane_normal, self.FS_height)
+            
             # Get node locations for other aircraft from this aircraft
             # This does not need to take the effective LAC into account
             if self._num_aircraft > 1:
@@ -473,12 +524,19 @@ class Scene:
                 self._P1[other_ind,airplane_slice,:] = p+quat_inv_trans(q, airplane_object.P1)
                 self._P0_joint[other_ind,airplane_slice,:] = p+quat_inv_trans(q, airplane_object.P0_joint)
                 self._P1_joint[other_ind,airplane_slice,:] = p+quat_inv_trans(q, airplane_object.P1_joint)
+                
+                # Image
+                if self.has_FS:
+                    self._P0_image[other_ind,airplane_slice,:] = reflect_vector_3d(self._P0[other_ind,airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                    self._P1_image[other_ind,airplane_slice,:] = reflect_vector_3d(self._P1[other_ind,airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                    self._P0_joint_image[other_ind,airplane_slice,:] = reflect_vector_3d(self._P0_joint[other_ind,airplane_slice,:], self.FS_plane_normal, self.FS_height)
+                    self._P1_joint_image[other_ind,airplane_slice,:] = reflect_vector_3d(self._P1_joint[other_ind,airplane_slice,:], self.FS_plane_normal, self.FS_height)
 
             # Spatial node vectors
             self._r_0[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_0)
             self._r_1[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_1)
             self._r_0_joint[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_0_joint)
-            self._r_1_joint[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_1_joint)
+            self._r_1_joint[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_1_joint)           
 
             # Spatial node vector magnitudes
             self._r_0_mag[airplane_slice,airplane_slice] = airplane_object.r_0_mag
@@ -490,8 +548,27 @@ class Scene:
             self._r_0_r_0_joint_mag[airplane_slice,airplane_slice] = airplane_object.r_0_r_0_joint_mag
             self._r_0_r_1_mag[airplane_slice,airplane_slice] = airplane_object.r_0_r_1_mag
             self._r_1_r_1_joint_mag[airplane_slice,airplane_slice] = airplane_object.r_1_r_1_joint_mag
-
+            
+            if self.has_FS:
+                # Image nodes
+                self._r_0_image[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_0_image)
+                self._r_1_image[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_1_image)
+                self._r_0_joint_image[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_0_joint_image) 
+                self._r_1_joint_image[airplane_slice,airplane_slice,:] = quat_inv_trans(q, airplane_object.r_1_joint_image) 
+                            
+                # Image spatial node vector magnitudes
+                self._r_0_mag_image[airplane_slice,airplane_slice] = airplane_object.r_0_mag_image
+                self._r_0_joint_mag_image[airplane_slice,airplane_slice] = airplane_object.r_0_joint_mag_image
+                self._r_1_mag_image[airplane_slice,airplane_slice] = airplane_object.r_1_mag_image
+                self._r_1_joint_mag_image[airplane_slice,airplane_slice] = airplane_object.r_1_joint_mag_image
+                
+                # Image spatial node vector magnitude products
+                self._r_0_r_0_joint_mag_image[airplane_slice,airplane_slice] = airplane_object.r_0_r_0_joint_mag_image
+                self._r_0_r_1_mag_image[airplane_slice,airplane_slice] = airplane_object.r_0_r_1_mag_image
+                self._r_1_r_1_joint_mag_image[airplane_slice,airplane_slice] = airplane_object.r_1_r_1_joint_mag_image
+    
         # Fill in spatial node vectors between airplanes
+        # NOTE: The node imaging here may be incorrect.
         if self._num_aircraft > 1:
             for airplane_slice in self._airplane_slices:
                 this_ind = range(airplane_slice.start, airplane_slice.stop)
@@ -508,11 +585,29 @@ class Scene:
                 self._r_0_joint_mag[airplane_slice,other_ind] = np.sqrt(np.einsum('ijk,ijk->ij', self._r_0_joint[airplane_slice,other_ind,:], self._r_0_joint[airplane_slice,other_ind,:]))
                 self._r_1_mag[airplane_slice,other_ind] = np.sqrt(np.einsum('ijk,ijk->ij', self._r_1[airplane_slice,other_ind,:], self._r_1[airplane_slice,other_ind,:]))
                 self._r_1_joint_mag[airplane_slice,other_ind] = np.sqrt(np.einsum('ijk,ijk->ij', self._r_1_joint[airplane_slice,other_ind,:], self._r_1_joint[airplane_slice,other_ind,:]))
-
+                
                 # Calculate magnitude products
                 self._r_0_r_0_joint_mag[airplane_slice,other_ind] = self._r_0_mag[airplane_slice,other_ind]*self._r_0_joint_mag[airplane_slice,other_ind]
                 self._r_0_r_1_mag[airplane_slice,other_ind] = self._r_0_mag[airplane_slice,other_ind]*self._r_1_mag[airplane_slice,other_ind]
                 self._r_1_r_1_joint_mag[airplane_slice,other_ind] = self._r_1_mag[airplane_slice,other_ind]*self._r_1_joint_mag[airplane_slice,other_ind]
+                
+                if self.has_FS:
+                    # Image spatial node vectors
+                    self._r_0_image[airplane_slice,other_ind,:] = self._PC[airplane_slice,np.newaxis,:]-self._P0_image[airplane_slice,other_ind,:]
+                    self._r_1_image[airplane_slice,other_ind,:] = self._PC[airplane_slice,np.newaxis,:]-self._P1_image[airplane_slice,other_ind,:]
+                    self._r_0_joint_image[airplane_slice,other_ind,:] = self._PC[airplane_slice,np.newaxis,:]-self._P0_joint_image[airplane_slice,other_ind,:]
+                    self._r_1_joint_image[airplane_slice,other_ind,:] = self._PC[airplane_slice,np.newaxis,:]-self._P1_joint_image[airplane_slice,other_ind,:]
+                    
+                    # Calculate image spatial node vector magnitudes
+                    self._r_0_mag_image[airplane_slice,other_ind] = np.sqrt(np.einsum('ijk,ijk->ij', self._r_0_image[airplane_slice,other_ind,:], self._r_0_image[airplane_slice,other_ind,:]))
+                    self._r_0_joint_mag_image[airplane_slice,other_ind] = np.sqrt(np.einsum('ijk,ijk->ij', self._r_0_joint_image[airplane_slice,other_ind,:], self._r_0_joint_image[airplane_slice,other_ind,:]))
+                    self._r_1_mag_image[airplane_slice,other_ind] = np.sqrt(np.einsum('ijk,ijk->ij', self._r_1_image[airplane_slice,other_ind,:], self._r_1_image[airplane_slice,other_ind,:]))
+                    self._r_1_joint_mag_image[airplane_slice,other_ind] = np.sqrt(np.einsum('ijk,ijk->ij', self._r_1_joint_image[airplane_slice,other_ind,:], self._r_1_joint_image[airplane_slice,other_ind,:]))
+                    
+                    # Calculate image magnitude products
+                    self._r_0_r_0_joint_mag_image[airplane_slice,other_ind] = self._r_0_mag_image[airplane_slice,other_ind]*self._r_0_joint_mag_image[airplane_slice,other_ind]
+                    self._r_0_r_1_mag_image[airplane_slice,other_ind] = self._r_0_mag_image[airplane_slice,other_ind]*self._r_1_mag_image[airplane_slice,other_ind]
+                    self._r_1_r_1_joint_mag_image[airplane_slice,other_ind] = self._r_1_mag_image[airplane_slice,other_ind]*self._r_1_joint_mag_image[airplane_slice,other_ind]
 
         # In-plane projection matrices
         if self._use_in_plane:
@@ -526,16 +621,36 @@ class Scene:
             denom = self._r_0_r_1_mag*(self._r_0_r_1_mag+np.einsum('ijk,ijk->ij', self._r_0, self._r_1))
             V_ji_bound = np.true_divide(numer, denom[:,:,np.newaxis])
             V_ji_bound[np.diag_indices(self._N)] = 0.0 # Ensure this actually comes out to be zero
-
-            # Jointed 0
+            
+            # Jointed inbound trailing vortex (subscript 0)
             numer = (self._r_0_joint_mag+self._r_0_mag)[:,:,np.newaxis]*np.cross(self._r_0_joint, self._r_0)
             denom = self._r_0_r_0_joint_mag*(self._r_0_r_0_joint_mag+np.einsum('ijk,ijk->ij', self._r_0_joint, self._r_0))
             V_ji_joint_0 = np.true_divide(numer, denom[:,:,np.newaxis])
 
-            # Jointed 1
+            # Jointed outbound trailing vortex (subscript 1)
             numer = (self._r_1_joint_mag+self._r_1_mag)[:,:,np.newaxis]*np.cross(self._r_1, self._r_1_joint)
             denom = self._r_1_r_1_joint_mag*(self._r_1_r_1_joint_mag+np.einsum('ijk,ijk->ij', self._r_1, self._r_1_joint))
             V_ji_joint_1 = np.true_divide(numer, denom[:,:,np.newaxis])
+            
+            if self.has_FS:
+                # Bound image
+                numer = ((self._r_0_mag_image+self._r_1_mag_image)[:,:,np.newaxis]*np.cross(self._r_0_image, self._r_1_image))
+                denom = self._r_0_r_1_mag_image*(self._r_0_r_1_mag_image+np.einsum('ijk,ijk->ij', self._r_0_image, self._r_1_image))
+                V_ji_bound_image = np.true_divide(numer, denom[:,:,np.newaxis])
+                V_ji_bound_image[np.diag_indices(self._N)] = 0.0 # Ensure this actually comes out to be zero
+                                       
+                # Image jointed inbound trailing vortex (subscript 0)
+                numer = (self._r_0_joint_mag_image+self._r_0_mag_image)[:,:,np.newaxis]*np.cross(self._r_0_joint_image, self._r_0_image)
+                denom = self._r_0_r_0_joint_mag_image*(self._r_0_r_0_joint_mag_image+np.einsum('ijk,ijk->ij', self._r_0_joint_image, self._r_0_image))
+                V_ji_joint_0_image = np.true_divide(numer, denom[:,:,np.newaxis])
+                
+                # Image jointed inbound trailing vortex (subscript 1)
+                numer = (self._r_1_joint_mag_image+self._r_1_mag_image)[:,:,np.newaxis]*np.cross(self._r_1_image, self._r_1_joint_image)
+                denom = self._r_1_r_1_joint_mag_image*(self._r_1_r_1_joint_mag_image+np.einsum('ijk,ijk->ij', self._r_1_image, self._r_1_joint_image))
+                V_ji_joint_1_image = np.true_divide(numer, denom[:,:,np.newaxis])
+                
+                # Sum image
+                self._V_ji_const_image = V_ji_bound_image+V_ji_joint_0_image+V_ji_joint_1_image
 
             # Sum
             self._V_ji_const = V_ji_bound+V_ji_joint_0+V_ji_joint_1
@@ -547,6 +662,8 @@ class Scene:
         self._v_wind[:,:] = self._get_wind(self._PC)
 
         self._solved = False
+# ********************************************************************
+
 
 
     def get_max_bound_vortex_length(self):
@@ -554,23 +671,27 @@ class Scene:
         return np.max(np.linalg.norm(self._dl, axis=1)).item()
 
 
+
+# ********************************************************************
     def _calc_invariant_flow_properties(self):
-        # Calculates the invariant flow properties at each control point and node location. These are
-        # dependent upon aircraft velocity and angular rate.
+        """
+        Calculates the invariant flow properties at each control point and node location. These are
+        dependent upon aircraft velocity and angular rate.
+        """
 
         # Loop through airplanes
         for airplane_object, airplane_slice in zip(self._airplane_objects, self._airplane_slices):
 
             # Freestream velocity due to airplane translation
-            v_trans = -airplane_object.v
-            w = airplane_object.w
+            v_trans = -airplane_object.v # freestream velocity
+            w = airplane_object.w # angular rate
 
             # Control point velocities
             v_rot = quat_inv_trans(airplane_object.q, -np.cross(w, airplane_object.PC_CG))
             v_wind = self._v_wind[airplane_slice]
             self._v_inf[airplane_slice,:] = v_trans+v_wind
             self._v_inf_and_rot[airplane_slice,:] = self._v_inf[airplane_slice,:]+v_rot
-
+            
             # Joint velocities for determining trailing vortex direction
             if self._match_machup_pro:
                 self._P0_joint_v_inf[airplane_slice,:] = v_trans+v_wind
@@ -599,7 +720,7 @@ class Scene:
             
                 # Create projection matrix
                 z_f = quat_inv_trans(airplane_object.q, [0.0, 0.0, 1.0]) # Body z-axis expressed in the earth frame
-                P = np.identity(3)-np.matmul(z_f[:,np.newaxis], z_f[np.newaxis,:])
+                P = np.identity(3)-np.matmul(z_f[:,np.newaxis], z_f[np.newaxis,:]) # P_eff from paper?
                 
                 # Project vortex directions
                 N = airplane_slice.stop-airplane_slice.start
@@ -609,30 +730,73 @@ class Scene:
             # Renormalize
             self._u_trailing_0 = self._u_trailing_0/np.linalg.norm(self._u_trailing_0, axis=-1, keepdims=True)
             self._u_trailing_1 = self._u_trailing_1/np.linalg.norm(self._u_trailing_1, axis=-1, keepdims=True)
-
+            
+        # Image vectors
+        if self.has_FS:
+            self._u_trailing_0_image = reflect_vector_3d(self._u_trailing_0, self.FS_plane_normal, self.FS_height)
+            self._u_trailing_1_image = reflect_vector_3d(self._u_trailing_1, self.FS_plane_normal, self.FS_height)
+                
         # Calculate V_ji
         # Influence of vortex segment 0 after the joint; ignore if the radius goes to zero.
         # Problem is, if the radius almost goes to zero, that can blow up the influence matrix without making it a nan.
         # The where statement I've added can take care of this, but then the decision has to be made as to where to cut
-        # it off. I'm loathe to make such a model-specific decision here... Maybe we could make this a user parameter?
+        # it off. I loathe to make such a model-specific decision here... Maybe we could make this a user parameter?
         # I don't trust most users to use this responsibly though. Not sure what to do. For now, I've set the cutoff very
         # low, so it shouldn't really ever kick in.
         # This should really be fixed by implementing wake relaxation.
-        denom = (self._r_0_joint_mag*(self._r_0_joint_mag-np.einsum('ijk,ijk->ij', self._u_trailing_0[np.newaxis], self._r_0_joint)))
-        if (np.abs(denom)<self._impingement_threshold).any():
+        denom0 = (self._r_0_joint_mag*(self._r_0_joint_mag-np.einsum('ijk,ijk->ij', self._u_trailing_0[np.newaxis], self._r_0_joint)))
+        if (np.abs(denom0)<self._impingement_threshold).any():
             warnings.warn("""MachUpX detected a trailing vortex impinging upon a control point. This can lead to greatly exaggerated induced velocities at the control point. See "Common Issues" in the documentation for more information. This warning can be suppressed by reducing "impingement_threshold" in the solver parameters.""")
-        V_ji_due_to_0 = np.where(denom[:,:,np.newaxis]>1e-13, np.nan_to_num(-np.cross(self._u_trailing_0, self._r_0_joint)/denom[:,:,np.newaxis]), 0.0)
+        V_ji_due_to_0 = np.where(denom0[:,:,np.newaxis]>1e-13, np.nan_to_num(-np.cross(self._u_trailing_0, self._r_0_joint)/denom0[:,:,np.newaxis]), 0.0)
 
         # Influence of vortex segment 1 after the joint
-        denom = (self._r_1_joint_mag*(self._r_1_joint_mag-np.einsum('ijk,ijk->ij', self._u_trailing_1[np.newaxis], self._r_1_joint)))
-        if (np.abs(denom)<self._impingement_threshold).any():
+        denom1 = (self._r_1_joint_mag*(self._r_1_joint_mag-np.einsum('ijk,ijk->ij', self._u_trailing_1[np.newaxis], self._r_1_joint)))
+        if (np.abs(denom1)<self._impingement_threshold).any():
             warnings.warn("""MachUpX detected a trailing vortex impinging upon a control point. This can lead to greatly exaggerated induced velocities at the control point. See "Common Issues" in the documentation for more information. This warning can be suppressed by reducing "impingement_threshold" in the solver parameters.""")
-        V_ji_due_to_1 = np.where(denom[:,:,np.newaxis]>1e-13, np.nan_to_num(np.cross(self._u_trailing_1, self._r_1_joint)/denom[:,:,np.newaxis]), 0.0)
-
+        V_ji_due_to_1 = np.where(denom1[:,:,np.newaxis]>1e-13, np.nan_to_num(np.cross(self._u_trailing_1, self._r_1_joint)/denom1[:,:,np.newaxis]), 0.0)
+        
+        if self.has_FS:
+            # Image vortex influence, inbound
+            denom0_image = (self._r_0_joint_mag_image*(self._r_0_joint_mag_image-np.einsum('ijk,ijk->ij', self._u_trailing_1_image[np.newaxis], self._r_0_joint_image)))
+            V_ji_due_to_0_image = np.where(denom0_image[:,:,np.newaxis]>1e-13, np.nan_to_num(-np.cross(self._u_trailing_0_image, self._r_0_joint_image)/denom0_image[:,:,np.newaxis]), 0.0)
+            
+            # Image vortex influence, outbound
+            denom1_image = (self._r_1_joint_mag_image*(self._r_1_joint_mag_image-np.einsum('ijk,ijk->ij', self._u_trailing_1_image[np.newaxis], self._r_1_joint_image)))
+            V_ji_due_to_1_image = np.where(denom1_image[:,:,np.newaxis]>1e-13, np.nan_to_num(np.cross(self._u_trailing_1_image, self._r_1_joint_image)/denom1_image[:,:,np.newaxis]), 0.0)
+            
+            # Wave potential influence (see Nishiyama's Linearized Steady Theory of Hydrofoils)
+            g = 9.81 # acceleration due to gravity in [m/s^2]
+            K0 = self._V_inf**2 / g
+            y_CP = self._PC[:,1] # control point y_coords
+            arg_K = 1/2*K0*(y_CP**2 + 4*self.submergence**2)**0.5
+            V_ji_due_to_wave = -(4*self.submergence**2 - y_CP**2) / ((4*self.submergence**2 + y_CP**2)**2) + (K0*2)/2 * np.exp(-K0*self.submergence) * \
+                ((1 + 4*self.submergence**2 / (y_CP**2+4*self.submergence**2)) * sp.k0(arg_K) + \
+                2*(2*self.submergence/((4*self.submergence**2 + y_CP**2)**0.5) - 1/(K0*(4*self.submergence**2 + y_CP**2)**0.5) + 8*self.submergence**2/(K0*(4*self.submergence**2 + y_CP**2)**1.5)) * sp.k1(arg_K))
+        
         # Sum
-        # In my definition of V_ji, the first index is the control point, the second index is the horseshoe vortex, and the third index is the vector components
-        self._V_ji = 1/(4*np.pi)*(V_ji_due_to_0+self._V_ji_const+V_ji_due_to_1)
-
+        # By the definition of V_ji, the first index is the control point, the second index is the horseshoe vortex, and the third index is the vector components
+        # Check if formulations need to account for a free surface or ground effect.
+        if self.has_FS and self.FS_biplane_boundary:
+            self._V_ji = 1/(4*np.pi)*(V_ji_due_to_0+self._V_ji_const+V_ji_due_to_1 + (V_ji_due_to_0_image+self._V_ji_const_image+V_ji_due_to_1_image))
+        elif self.has_FS and not self.FS_biplane_boundary:
+            self._V_ji = 1/(4*np.pi)*(V_ji_due_to_0+self._V_ji_const+V_ji_due_to_1 - (V_ji_due_to_0_image+self._V_ji_const_image+V_ji_due_to_1_image))
+        else:
+            self._V_ji = 1/(4*np.pi)*(V_ji_due_to_0+self._V_ji_const+V_ji_due_to_1)
+        
+        # WARNING: experimental
+        # Add induced velocity due to waves to the induced velocities at each control point
+        if self.use_wave_corrections:         
+            array_list = []
+            for i in range(V_ji_due_to_wave.shape[0]):
+                template = np.zeros((self._N,3))
+                row = np.asarray([0,0,V_ji_due_to_wave[i]])
+                template[i,:] = row
+                #rep_row = np.tile(row, (self._N, 1))
+                array_list.append(template)
+            fin_array = np.stack(array_list)
+            self._V_ji += 1/(4*np.pi) * fin_array
+                            
+        
         # Get effective freesream and calculate initial approximation for airfoil parameters (Re and M are only used in the linear solution)
         if self._use_in_plane:
             self._v_inf_in_plane = np.matmul(self._P_in_plane, self._v_inf[:,:,np.newaxis]).reshape((self._N,3))
@@ -666,6 +830,9 @@ class Scene:
             self._correct_CL_for_sweep()
 
         self._solved = False
+# ********************************************************************
+
+
 
 
     def _solve_w_scipy(self, **kwargs):
@@ -726,7 +893,6 @@ class Scene:
     def _calc_v_i(self):
         # Determines the local velocity at each control point
         self._v_i = self._v_inf_and_rot+np.einsum('ijk,j->ik', self._V_ji, self._gamma)
-        #self._v_i = self._v_inf+(self._V_ji.transpose((2,0,1))@self._gamma).T
 
     
     def _get_section_lift(self):
@@ -796,7 +962,7 @@ class Scene:
 
         self._CL += self._CLa*(self._aL0-self._aL0*self._C_sweep_inv) # New method
 
-
+# ********************************************************************
     def _solve_linear(self, **kwargs):
         # Determines the vortex strengths of all horseshoe vortices in the scene using the linearized equations
 
@@ -827,8 +993,8 @@ class Scene:
         self._gamma = np.linalg.solve(A, b)
 
         return time.time()-start_time
-
-
+# ********************************************************************
+# ********************************************************************
     def _solve_nonlinear(self, **kwargs):
         # Nonlinear improvement to the vector of gammas already determined
         verbose = kwargs.get("verbose", False)
@@ -915,7 +1081,7 @@ class Scene:
                 print("Nonlinear solver successfully converged. Final error: {0}".format(error))
 
         return time.time()-self._nonlinear_start_time
-
+# ********************************************************************
 
     def _get_frames(self, **kwargs):
         body_frame = kwargs.get("body_frame", True)
@@ -923,7 +1089,7 @@ class Scene:
         wind_frame = kwargs.get("wind_frame", True)
         return body_frame, stab_frame, wind_frame
 
-
+# ********************************************************************
     def _integrate_forces_and_moments(self, **kwargs):
         # Determines the forces and moments on each lifting surface
         start_time = time.time()
@@ -1406,7 +1572,7 @@ class Scene:
                     self._FM[airplane_name]["total"]["Mz_w"] = FM_w_airplane_total[5].item()
 
         return time.time()-start_time
-
+# ********************************************************************
 
     def solve_forces(self, **kwargs):
         """Solves the NLL equations to determine the forces and moments on each aircraft.
@@ -3299,75 +3465,6 @@ class Scene:
 
         airplane_object = self._airplanes[aircraft]
         return airplane_object.S_w, airplane_object.l_ref_lon, airplane_object.l_ref_lat
-
-
-    def export_stl(self, **kwargs):
-        """Generates a 3D model of the aircraft. If only one aircraft is specified, the model is centered on that
-        aircraft's origin. If more than one aircraft is specified, the model is centered on the origin of the earth-
-        fixed coordinate system.
-
-        Parameters
-        ----------
-        filename: str
-            Name of the file to export the model to. Must be .stl.
-
-        section_resolution : int, optional
-            Number of points to use in dicretizing the airfoil section outlines. Defaults to 200. Note this is the
-            number of outline points where two exist at the trailing edge. Thus the number of panels will be one less
-            than this number.
-
-        aircraft : str or list, optional
-            Name(s) of the aircraft to include in the model. Defaults to all aircraft in the scene.
-
-        close_te : bool, optional
-            Whether to force the trailing edge to be sealed. Defaults to true
-        """
-
-        # Specify the aircraft
-        aircraft_names = self._get_aircraft(**kwargs)
-
-        # Model of single aircraft
-        if len(aircraft_names) == 1:
-            self._airplanes[aircraft_names[0]].export_stl(**kwargs)
-            return
-
-        # Check for .stl file
-        filename = kwargs.get("filename")
-        if ".stl" not in filename:
-            raise IOError("{0} is not a .stl file.".format(filename))
-
-        # Multiple aircraft
-        else:
-            num_facets = 0
-            vector_dict = {}
-
-            # Loop through aircraft
-            for aircraft_name in aircraft_names:
-                airplane_object = self._airplanes[aircraft_name]
-                vector_dict[aircraft_name] = {}
-
-                # Loop through segments
-                for segment_name, segment_object in airplane_object.wing_segments.items():
-                    vectors = segment_object.get_stl_vectors(**kwargs)
-                    vector_dict[aircraft_name][segment_name] = airplane_object.p_bar+quat_inv_trans(airplane_object.q, vectors)
-                    num_facets += int(vectors.shape[0]/3)
-
-            # Allocate mesh
-            model_mesh = mesh.Mesh(np.zeros(num_facets, dtype=mesh.Mesh.dtype))
-
-            # Store vectors
-            index = 0
-            for aircraft_name in aircraft_names:
-                airplane_object = self._airplanes[aircraft_name]
-                for segment_name, segment_object in airplane_object.wing_segments.items():
-                    num_segment_facets = int(vector_dict[aircraft_name][segment_name].shape[0]/3)
-                    for i in range(index, index+num_segment_facets):
-                        for j in range(3):
-                            model_mesh.vectors[i][j] = vector_dict[aircraft_name][segment_name][3*(i-index)+j]
-                    index += num_segment_facets
-
-            # Export
-            model_mesh.save(filename)
 
 
     def export_vtk(self, **kwargs):
