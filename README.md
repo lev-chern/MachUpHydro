@@ -16,6 +16,16 @@ J. T. Reid and D. F. Hunsaker, "A General Approach to Lifting-Line Theory, Appli
 ## Documentation
 Documentation on the original MachUpX can be found at [ReadTheDocs](https://machupx.readthedocs.io). Please refer to the documentation for instructions on installation, etc. Specific help with package functions can also be found in the docstrings.
 
+Additional input options are available with MachUpHydro for the "scene" class under the "scene" heading. These are:
+- "surface_effect_conditions" : dictionary containing options for controlling how surface effects are handled.
+  - "has_free_surface" : boolean, whether or not to include a surface effect boundary condition in the simulation. Defaults to False.
+  - "surface_plane_normal" : 3D vector array [x,y,z], specifies the unit vector normal to the surface in 3D cartesian coordinates. Defaults to [0,0,1].
+  - "point_on_surface" : 3D vector array [x.y.z], specifies a point on the surface in #D cartesian coordinates. Defaults to [0,0,0].
+  - "biplane_BC" : boolean, whether to use the biplane version of surface effect for the simulation.. If false, then ground effect will be simulated instead. Defaults to False.
+  - "wave_corrections" : boolean, whether to correct the for the effect of gravity and surface waves. Currently experimental and recommended to keep turned off. Defaults to False.
+  - "submergence" : float, the dimensional submergence of the hydrofoil to be used for wave and gravity corrections. Defaults to 0. Only used if "wave_corrections" is set to True.
+
+
 ## Support
 There is an active MachUpX discussion forum on [Google Groups](https://groups.google.com/forum/#!categories/machup_forum). Help on using MachUpX can be found there.
 For bugs, create a new issue on the Github repo.
