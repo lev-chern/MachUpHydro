@@ -1,5 +1,7 @@
-# MachUpX
-An implementation of the Goates-Hunsaker method for solving the general numerical lifting-line problem. This method has been developed in recent years based on the original numerical liting-line method developed by Phillips and Snyder. The main reference for the Goates-Hunsaker method is:
+# MachUpHydro
+An implementation of the Goates-Hunsaker method for solving the general numerical lifting-line problem in the context of hydrofoils, with free surface effects included. 
+
+This method has been developed in recent years based on the original numerical liting-line method developed by Phillips and Snyder. The main reference for the Goates-Hunsaker method is:
 
 C. D. Goates and D. F. Hunsaker, "Practical Implementation of a General Numerical Lifting-Line Theory," *AIAA SciTech Forum*, Virtual Event, 2021.
 
@@ -12,12 +14,10 @@ W. F. Phillips, "Flow over Multiple Lifting Surfaces," *Mechanics of Flight*, 2n
 J. T. Reid and D. F. Hunsaker, "A General Approach to Lifting-Line Theory, Applied to Wings with Sweep," *AIAA SciTech Forum*, Orlando, 2020.
 
 ## Documentation
-Documentation can be found at [ReadTheDocs](https://machupx.readthedocs.io). Please refer to the documentation for instructions on installation, etc. Specific help with package functions can also be found in the docstrings. Please read the documentation thoroughly before contacting the development team.
-
-Check out our introduction video [here](https://youtu.be/KLZWTqD8GhM).
+Documentation on the original MachUpX can be found at [ReadTheDocs](https://machupx.readthedocs.io). Please refer to the documentation for instructions on installation, etc. Specific help with package functions can also be found in the docstrings.
 
 ## Support
-There is an active MachUp discussion forum on [Google Groups](https://groups.google.com/forum/#!categories/machup_forum). Help on using MachUpX can be found there.
+There is an active MachUpX discussion forum on [Google Groups](https://groups.google.com/forum/#!categories/machup_forum). Help on using MachUpX can be found there.
 For bugs, create a new issue on the Github repo.
 
 ## License
