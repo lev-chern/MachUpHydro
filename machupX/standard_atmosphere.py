@@ -26,14 +26,14 @@ class StandardAtmosphere:
         self._H_b = np.array([0.0, 11000.0, 20000.0, 32000.0, 47000.0, 51000.0, 71000.0, 84852.0]) # m
         self._L_M_b = np.array([-0.0065, 0.0, 0.001, 0.0028, 0.0, -0.0028, -0.002]) # K/m
         self._T_M_b = np.array([0.0, -71.5, -71.5, -59.5, -17.5, -17.5, -73.5, -101.204]) # K
-        self._r_0 = 6356766.0 # Radius of the earth in meters
+        self._r_0 = 6371100.0 # Radius of the earth in meters
         self._g_0_prime = 9.80665 # m/s^2
         self._M_0 = 28.9644 # kg/kmol
         self._R_star = 8.31432e3 # N*m/kmol*K
         self._P_0 = 1.01325e5 # N/m^2
         self._S = 110.4 # K
         self._beta = 1.458e-6 # kg/s*m*K^1/2
-        self._gamma = 1.40
+        self._gamma = 1.40 # specific heat ratio of air
 
 
     def T(self, h):
@@ -44,7 +44,7 @@ class StandardAtmosphere:
         T = np.interp(H, self._H_b, self._T_M_b)+self._T_0+273.15
 
         if self._unit_sys == "English":
-            return 9.0/5.0*T
+            return 5.0/9.0*T
         else:
             return T
 

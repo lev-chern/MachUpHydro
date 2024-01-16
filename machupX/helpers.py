@@ -316,3 +316,72 @@ def parse_input(mux_input):
         return scene_dict, airplane_names[0], airplanes[0], states[0], control_states[0]
     else:
         return scene_dict, airplane_names, airplanes, states, control_states
+        
+        
+def reflect_vector_3d(vectors, plane_normal, point_on_plane, axis=0):
+    """
+    Reflects 3D vectors about an arbitrary plane defined by a point-and-normal. Returns the reflected vectors.
+    
+    Argument "axis" specifies the direction along which vectors are stacked if "vectors" is an array.
+    """    
+    
+    vectors = np.asarray(vectors)
+    plane_normal = np.asarray(plane_normal)
+    point_on_plane = np.asarray(point_on_plane)
+    
+    first_dim = 0
+    is_3D = False
+    if len(vectors.shape) > 2:
+        first_dim = vectors.shape[0]
+        is_3D = True
+        
+    # Initialize an array to store the reflected vectors
+    reflected_vectors = np.zeros_like(vectors)
+    
+    # Reflect vectors. Check number of dimensions first
+    if vectors.ndim == 1:
+        
+        # Calculate the projection of the vector onto the plane
+        projection = vectors - np.dot(vectors - point_on_plane, plane_normal)*plane_normal
+        
+        # Calculate the reflected vector
+        reflected_vectors = 2 * projection - vectors
+        
+    # Reflect 2D array of vectors
+    else:
+            
+        for i in range(max(first_dim,1)):
+            
+            if is_3D:
+                this_array = vectors[i,:,:]
+            else:
+                this_array = vectors
+                
+            if axis == 0:
+                iter_axis = this_array.shape[0]
+            elif axis == 1:
+                iter_axis = this_array.shape[1]
+            else:
+                raise IOError(f"Cannot iterate along axis {axis}. Use 0 for rows or 1 for columns.")
+                
+            for j in range(iter_axis):
+            
+                if axis == 0:
+                    vector = this_array[j,:]
+                elif axis == 1:
+                    vector = this_array[:,j]
+                                        
+                # Calculate the projection of the vector onto the plane
+                projection = vector - np.dot(vector - point_on_plane, plane_normal)*plane_normal
+                
+                # Calculate the reflected vector
+                if axis == 0 and not is_3D:
+                    reflected_vectors[j,:] = 2 * projection - vector
+                elif axis == 1 and not is_3D:
+                    reflected_vectors[:,j] = 2 * projection - vector
+                elif axis == 0 and is_3D:
+                    reflected_vectors[i,j,:] = 2 * projection - vector
+                elif axis == 1 and is_3D:
+                    reflected_vectors[i,:,j] = 2 * projection - vector              
+
+    return reflected_vectors

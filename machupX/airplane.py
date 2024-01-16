@@ -9,9 +9,9 @@ import math as m
 import scipy.integrate as integ
 
 from airfoil_db import Airfoil
-from stl import mesh
+#from stl import mesh
 from mpl_toolkits.mplot3d import Axes3D
-from machupX.helpers import import_value,  euler_to_quat, check_filepath, quat_trans, quat_inv_trans, quat_conj
+from machupX.helpers import import_value,  euler_to_quat, check_filepath, quat_trans, quat_inv_trans, quat_conj, reflect_vector_3d
 from machupX.wing_segment import WingSegment
 
 
@@ -56,7 +56,15 @@ class Airplane:
     """
 
     def __init__(self, name, airplane_input, unit_system, scene, init_state={}, init_control_state={}, v_wind=[0.0, 0.0, 0.0]):
-
+        """
+        The has_FS flag is a boolean to tell whether image and wave vortices should be accounted for in the calculation of induced velocities. Should be set to True when simulating hydrofoils.
+        """
+        
+        # Parameters for surface effect calcs
+        self.has_FS = scene.has_FS
+        self.FS_plane_normal = scene.FS_plane_normal
+        self.FS_height = scene.FS_height
+        
         # Store basic info
         self.name = name
         self._unit_sys = unit_system
@@ -75,8 +83,8 @@ class Airplane:
         self._load_wing_segments()
         self._check_reference_params()
         self._initialize_controls(init_control_state)
-
-
+ 
+ 
     def _load_params(self, airplane_input):
         # Parses basic parameters from the airplane input
 
@@ -99,7 +107,7 @@ class Airplane:
         self.W = import_value("weight", self._input_dict, self._unit_sys, None)
         self.S_w = import_value("area", self._input_dict.get("reference", {}), self._unit_sys, -1)
         self.l_ref_lon = import_value("longitudinal_length", self._input_dict.get("reference", {}), self._unit_sys, -1)
-        self.l_ref_lat = import_value("lateral_length", self._input_dict.get("reference", {}), self._unit_sys, -1)
+        self.l_ref_lat = import_value("lateral_length", self._input_dict.get("reference", {}), self._unit_sys, -1)       
 
 
     def set_state(self, **kwargs):
@@ -160,7 +168,7 @@ class Airplane:
 
         # Set up velocity
         v_value = import_value("velocity", kwargs, self._unit_sys, None)
-
+ 
         # Velocity magnitude
         if isinstance(v_value, float):
 
@@ -169,7 +177,7 @@ class Airplane:
             beta = import_value("beta", kwargs, self._unit_sys, 0.0)
 
             # Set state
-            self.v = np.array([9.181994, 0.0, 0.0]) # Keeps the following call to set_aerodynamic_state() from breaking; will be overwritten
+            self.v = np.array([10, 0.0, 0.0]) # Keeps the following call to set_aerodynamic_state() from breaking; will be overwritten. Do not initialize as zero as this will cause a NaN error.
             self.set_aerodynamic_state(alpha=alpha, beta=beta, velocity=v_value, v_wind=v_wind)
 
         # Body-fixed velocity vector
@@ -257,7 +265,7 @@ class Airplane:
         """
         # Determine velocity relative to the wind in the body-fixed frame
         v = quat_trans(self.q, self.v-v_wind)
-        V = m.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])
+        V = m.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]) # velocity magnitude
 
         # Calculate values
         alpha = m.degrees(m.atan2(v[2], v[0]))
@@ -429,10 +437,14 @@ class Airplane:
 
         # Perform geometry calculations
         self._calculate_geometry()
+        
+        
 
-
+    ##########################################
     def _calculate_geometry(self):
-        # Figures out which wing segments are contiguous and sets up the lists of control points and vortex nodes
+        """
+        Figures out which wing segments are contiguous and sets up the lists of control points and vortex nodes
+        """
 
         # Initialize arrays
         # Geometry
@@ -460,21 +472,39 @@ class Airplane:
         self.P1_eff = np.zeros((self.N,self.N,3)) # Outbound vortex node location (effective locus of aerodynamic centers)
         self.P1_span_locs = np.zeros(self.N)
         self.P1_joint_eff = np.zeros((self.N,self.N,3)) # Outbound vortex joint node location (effective locus of aerodynamic centers)
-
+        
         # Section unit vectors
-        self.u_a = np.zeros((self.N,3))
-        self.u_n = np.zeros((self.N,3))
-        self.u_s = np.zeros((self.N,3))
-        self.u_a_unswept = np.zeros((self.N,3))
+        self.u_a = np.zeros((self.N,3)) # unit swept axial vector parallel to local chord line
+        self.u_n = np.zeros((self.N,3)) # unit swept normal vector perpendicular to local chord and to span
+        self.u_s = np.zeros((self.N,3)) # unit swept span vector perpendicular to the local foil section
+        self.u_a_unswept = np.zeros((self.N,3)) # ditto unswept
         self.u_n_unswept = np.zeros((self.N,3))
         self.u_s_unswept = np.zeros((self.N,3))
         self.P0_u_a = np.zeros((self.N,3))
         self.P1_u_a = np.zeros((self.N,3))
-
+        
+        # Initialize arrays for storing image nodes if needed
+        if self.has_FS:
+            # Image section unit vectors
+            self.u_a_image = np.zeros((self.N,3)) # unit swept axial vector parallel to local chord line
+            self.u_n_image = np.zeros((self.N,3)) # unit swept normal vector perpendicular to local chord and to span
+            self.u_s_image = np.zeros((self.N,3)) # unit swept span vector perpendicular to the local foil section
+            self.u_a_unswept_image = np.zeros((self.N,3)) # ditto unswept
+            self.u_n_unswept_image = np.zeros((self.N,3))
+            self.u_s_unswept_image = np.zeros((self.N,3))
+            self.P0_u_a_image = np.zeros((self.N,3))
+            self.P1_u_a_image = np.zeros((self.N,3))
+                    
+            # Image nodes
+            self.P0_eff_image = np.zeros((self.N,self.N,3))
+            self.P1_eff_image = np.zeros((self.N,self.N,3))
+            self.P0_joint_eff_image = np.zeros((self.N,self.N,3))
+            self.P1_joint_eff_image = np.zeros((self.N,self.N,3))
+        
         # Reid correction parameters
         reid_corr = np.zeros(self.N) # Whether to use Reid corrections
         sigma_blend = np.zeros(self.N) # Blending distance
-        delta_joint = np.zeros(self.N) # Joint length
+        delta_joint = np.zeros(self.N) # Non dimensional joint length as function of chord
 
         # Group wing segments into wings
         self._sort_segments_into_wings()
@@ -528,8 +558,8 @@ class Airplane:
                 self.P0[cur_slice,:] = segment.nodes[:-1]
                 self.P1[cur_slice,:] = segment.nodes[1:]
                 self.P0_eff[:,cur_slice,:] = segment.nodes[:-1]
-                self.P1_eff[:,cur_slice,:] = segment.nodes[1:]
-
+                self.P1_eff[:,cur_slice,:] = segment.nodes[1:]           
+                
                 # Section direction vectors
                 self.u_a[cur_slice,:] = segment.u_a_cp
                 self.u_n[cur_slice,:] = segment.u_n_cp
@@ -539,14 +569,25 @@ class Airplane:
                 self.u_s_unswept[cur_slice,:] = segment.u_s_cp_unswept
                 self.P0_u_a[cur_slice,:] = segment.u_a_node[:-1]
                 self.P1_u_a[cur_slice,:] = segment.u_a_node[1:]
-
+                
+                # Image section direction vectors
+                if self.has_FS:
+                    self.u_a_image[cur_slice,:] = reflect_vector_3d(segment.u_a_cp, self.FS_plane_normal, self.FS_height)
+                    self.u_n_image[cur_slice,:] = reflect_vector_3d(segment.u_n_cp, self.FS_plane_normal, self.FS_height)
+                    self.u_s_image[cur_slice,:] = reflect_vector_3d(segment.u_s_cp, self.FS_plane_normal, self.FS_height)
+                    self.u_a_unswept_image[cur_slice,:] = reflect_vector_3d(segment.u_a_cp_unswept, self.FS_plane_normal, self.FS_height)
+                    self.u_n_unswept_image[cur_slice,:] = reflect_vector_3d(segment.u_n_cp_unswept, self.FS_plane_normal, self.FS_height)
+                    self.u_s_unswept_image[cur_slice,:] = reflect_vector_3d(segment.u_s_cp_unswept, self.FS_plane_normal, self.FS_height)
+                    self.P0_u_a_image[cur_slice,:] = reflect_vector_3d(segment.u_a_node[:-1], self.FS_plane_normal, self.FS_height)
+                    self.P1_u_a_image[cur_slice,:] = reflect_vector_3d(segment.u_a_node[1:], self.FS_plane_normal, self.FS_height)
+                
                 # Update for next segment
                 cur_index += N
                 cur_span_from_left_tip += segment.b
 
             # Determine slice for this wing
             self.wing_slices.append(slice(cur_index-self._wing_N[i], cur_index))
-
+        
         # Calculate joint locations for actual lifting line
         # I feel as if there needs to be some blending in u_a here as well. This would make the trailing vortex sheet
         # discontinuous when seen by another lifting surface. Right? But I can't think of a good way to fix this right now,
@@ -556,7 +597,7 @@ class Airplane:
         self.P1_joint = self.P1+(self.P1_chord*delta_joint*reid_corr)[:,np.newaxis]*self.P1_u_a
         self.P0_joint_eff[:] = np.copy(self.P0_joint)[np.newaxis,:,:]
         self.P1_joint_eff[:] = np.copy(self.P1_joint)[np.newaxis,:,:]
-
+        
         # Calculate control point locations relative to CG
         self.PC_CG = self.PC-self.CG[np.newaxis,:]
 
@@ -595,7 +636,7 @@ class Airplane:
                 blend_1 = np.exp(-sigma_blend[i]*ds1*ds1)[:,np.newaxis]
                 self.P1_eff[i,wing_slice,:] = straight_ac*blend_1+self.P1_eff[i,wing_slice,:]*(1.0-blend_1)
 
-                # Blend u_a_unswept
+                # Blend u_a_unswept (or is it u_a?)
                 ds = self.PC_span_locs[wing_slice]-PC_span
                 blend = np.exp(-sigma_blend[i]*ds*ds)[:,np.newaxis]
                 u_a_straight = self.u_a_unswept[i,:]
@@ -622,7 +663,7 @@ class Airplane:
                 # Same for both
                 dt = np.zeros(wing_slice.stop-wing_slice.start)
 
-                # P0
+                # P0 joint
                 d_P0 = np.diff(self.P0_eff[i,wing_slice,:], axis=0)
                 dt[1:] = np.cumsum(np.linalg.norm(d_P0, axis=1))
                 T0 = np.gradient(self.P0_eff[i,wing_slice,:], dt, edge_order=2, axis=0)
@@ -645,8 +686,15 @@ class Airplane:
                 u_j = c1[:,np.newaxis]*u_a+c2[:,np.newaxis]*T1
                 u_j = u_j/np.linalg.norm(u_j, axis=-1, keepdims=True)
                 self.P1_joint_eff[i,wing_slice,:] = self.P1_eff[i,wing_slice,:]+self.P1_chord[wing_slice,np.newaxis]*delta_joint[wing_slice,np.newaxis]*u_j
-
-                # Plot effective vortices for control points at the root
+                
+                # Calculate image vortex nodes P0, P1 and joints
+                if self.has_FS:
+                    self.P0_eff_image[i,wing_slice,:] = reflect_vector_3d(self.P0_eff[i,wing_slice,:], self.FS_plane_normal, self.FS_height)
+                    self.P1_eff_image[i,wing_slice,:] = reflect_vector_3d(self.P1_eff[i,wing_slice,:], self.FS_plane_normal, self.FS_height)
+                    self.P0_joint_eff_image[i,wing_slice,:] = reflect_vector_3d(self.P0_joint_eff[i,wing_slice,:], self.FS_plane_normal, self.FS_height)
+                    self.P1_joint_eff_image[i,wing_slice,:] = reflect_vector_3d(self.P1_joint_eff[i,wing_slice,:], self.FS_plane_normal, self.FS_height)
+                
+                # Plot effective vortices for control points at the root - for debugging purposes.
                 if False and i > (self.N//2-2) and i < (self.N//2+1):
                     fig = plt.figure(figsize=plt.figaspect(1.0))
                     ax = fig.gca(projection='3d')
@@ -667,27 +715,46 @@ class Airplane:
                 # Copy node locations into joint locations (i.e. no jointing)
                 self.P0_joint_eff[i,:,:] = np.copy(self.P0_eff[i,:,:])
                 self.P1_joint_eff[i,:,:] = np.copy(self.P1_eff[i,:,:])
-
+        
         # Calculate vectors from control points to vortex node locations
         self.r_0 = self.PC[:,np.newaxis,:]-self.P0_eff
         self.r_1 = self.PC[:,np.newaxis,:]-self.P1_eff
         self.r_0_joint = self.PC[:,np.newaxis,:]-self.P0_joint_eff
         self.r_1_joint = self.PC[:,np.newaxis,:]-self.P1_joint_eff
-
+        
         # Calculate spatial node vector magnitudes
         self.r_0_mag = np.linalg.norm(self.r_0, axis=-1)
         self.r_0_joint_mag = np.linalg.norm(self.r_0_joint, axis=-1)
         self.r_1_mag = np.linalg.norm(self.r_1, axis=-1)
         self.r_1_joint_mag = np.linalg.norm(self.r_1_joint, axis=-1)
-
+        
         # Calculate magnitude products
         self.r_0_r_0_joint_mag = self.r_0_mag*self.r_0_joint_mag
         self.r_0_r_1_mag = self.r_0_mag*self.r_1_mag
         self.r_1_r_1_joint_mag = self.r_1_mag*self.r_1_joint_mag
-
+        
+        # Image calcs
+        if self.has_FS:
+            # Image vectors
+            self.r_0_image = self.PC[:,np.newaxis,:]-self.P0_eff_image
+            self.r_1_image = self.PC[:,np.newaxis,:]-self.P1_eff_image 
+            self.r_0_joint_image = self.PC[:,np.newaxis,:]-self.P0_joint_eff_image
+            self.r_1_joint_image = self.PC[:,np.newaxis,:]-self.P1_joint_eff_image
+                    
+            # Image vector mags
+            self.r_0_mag_image = np.linalg.norm(self.r_0_image, axis=-1)
+            self.r_0_joint_mag_image = np.linalg.norm(self.r_0_joint_image, axis=-1)
+            self.r_1_mag_image = np.linalg.norm(self.r_1_image, axis=-1)
+            self.r_1_joint_mag_image = np.linalg.norm(self.r_1_joint_image, axis=-1)
+            
+            # Calculate image magnitude products
+            self.r_0_r_0_joint_mag_image = self.r_0_mag_image*self.r_0_joint_mag_image
+            self.r_0_r_1_mag_image = self.r_0_mag_image*self.r_1_mag_image
+            self.r_1_r_1_joint_mag_image = self.r_1_mag_image*self.r_1_joint_mag_image      
+        
         # Calculate differential length vectors
         self.dl = self.P1-self.P0
-
+        
         # Plot effective LACs
         if self._input_dict.get("plot_lacs", False):
             fig = plt.figure(figsize=plt.figaspect(1.0))
@@ -707,7 +774,9 @@ class Airplane:
 
 
     def _sort_segments_into_wings(self):
-        # Groups segments into wings for calculating effective lifting lines
+        """ 
+        Groups segments into wings for calculating effective lifting lines
+        """
 
         # Count the number of "lifting lines" we have
         N_ll = 0
@@ -785,7 +854,9 @@ class Airplane:
 
 
     def _sort_segments_left_to_right(self):
-        # Sort segments along wingspan from left to right
+        """ 
+        Sort segments along wingspan from left to right
+        """
 
         for i in range(self._num_wings):
             sorted_segments = []
@@ -1048,7 +1119,7 @@ class Airplane:
                 print(" ".join([str(i) for i in panel]), file=export_handle)
 
 
-    def _get_vtk_data(self, **kwargs):
+    def get_vtk_data(self, **kwargs):
         # Assembles a list of vertices and panel vertex indices for creating a vtk mesh
 
         # Get vtk data

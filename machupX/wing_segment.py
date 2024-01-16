@@ -67,9 +67,10 @@ class WingSegment:
             self.has_mirror = False
         else:
             self.has_mirror = self._input_dict.get("side", "both") == "both"
-
+        
+        self._initialize_params() # moved this statement outside of the if statement to force initilization for all segments, including the dummy origin one.
         if self.ID != 0: # These do not need to be run for the origin segment
-            self._initialize_params()
+            
             self._initialize_airfoils(airfoil_dict)
             self._initialize_getters()
             self._initialize_lifting_line()
@@ -82,7 +83,7 @@ class WingSegment:
 
             # Get CAD options
             self._cad_options = self._input_dict.get("CAD_options", {})
-
+            
 
     def _initialize_params(self):
 
@@ -115,6 +116,7 @@ class WingSegment:
 
         # Apply y-offset
         self.y_offset = connect_dict.get("y_offset", 0.0)
+        
         if self.side == "left":
             self._delta_origin[1] -= self.y_offset
         else:
@@ -157,15 +159,15 @@ class WingSegment:
 
             # Determine number of sections and number of control points in each section
             num_sec = len(discont)-1
-            sec_N = []
+            num_control_pts = []
             for i in range(num_sec):
                 N = int(round(self.N*(discont[i+1]-discont[i])))
-                sec_N.append(N)
+                num_control_pts.append(N)
 
             # Check all the points are accounted for
-            diff = int(sum(sec_N)-self.N)
+            diff = int(sum(num_control_pts)-self.N)
             if diff != 0:
-                sec_N[0] -= diff # Use the root segment to make up the difference
+                num_control_pts[0] -= diff # Use the root segment to make up the difference
 
             # Initialize span location storage
             node_span_locs = [0.0]
@@ -175,18 +177,18 @@ class WingSegment:
             for i in range(num_sec):
 
                 # For Sections with no assigned control points, raise a warning and skip
-                if sec_N[i] == 0:
+                if num_control_pts[i] == 0:
                     warnings.warn("""Not enough control points for {0} to distribute between {1} and {2} percent span. Properties of this section will not factor into results. If undesired, increase number of control points or alter clustering.""".format(self.name, int(discont[i]*100), int(discont[i+1]*100)))
                     continue
 
                 # Create node distribution
-                node_theta_space = list(np.linspace(0.0, np.pi, sec_N[i]+1))
+                node_theta_space = list(np.linspace(0.0, np.pi, num_control_pts[i]+1))
                 for theta in node_theta_space[1:]:
                     s = 0.5*(1-np.cos(theta)) # Span fraction
                     node_span_locs.append(discont[i]+s*(discont[i+1]-discont[i]))
 
                 # Create control point distribution
-                cp_theta_space = np.linspace(np.pi/sec_N[i], np.pi, sec_N[i])-np.pi/(2*sec_N[i])
+                cp_theta_space = np.linspace(np.pi/num_control_pts[i], np.pi, num_control_pts[i])-np.pi/(2*num_control_pts[i])
                 for theta in cp_theta_space:
                     s = 0.5*(1-np.cos(theta)) # Span fraction
                     cp_span_locs.append(discont[i]+s*(discont[i+1]-discont[i]))
@@ -677,7 +679,10 @@ class WingSegment:
 
 
     def _setup_cp_data(self):
-        # Creates and stores vectors of important data at each control point
+        """
+        Creates and stores vectors of important data at each control point
+        """
+        
         self.u_a_cp = self._get_axial_vec(self.cp_span_locs)
         self.u_n_cp = self._get_normal_vec(self.cp_span_locs)
         self.u_s_cp = self._get_span_vec(self.cp_span_locs)
@@ -847,11 +852,11 @@ class WingSegment:
             # For mirrored wing segments, a right segment only ever attaches to a right segment and same with left
             if self.has_mirror and side not in self.name:
                 return False
-
+            
             # Determine the connection point
             if connect_dict.get("location", "tip") == "root":
                 attachment_point = self.get_root_loc()
-
+                
                 # Remove y-offset
                 if self.side == "left":
                     attachment_point[1] += self.y_offset
@@ -1073,9 +1078,12 @@ class WingSegment:
 
 
     def _get_control_point_coef(self, alpha, Rey, Mach, coef_func):
-        # Determines the value of the desired coefficient at each control point
+        """
+        Determines the value of the desired coefficient at each control point
+        """
 
         # Only one airfoil
+        # NOTE: changed "self.airfoils" to "self._airfoils" to match vairbale names from above
         if self._num_airfoils == 1:
             try:
                 return getattr(self._airfoils[0], coef_func)(alpha=alpha,
@@ -2067,7 +2075,7 @@ class WingSegment:
 
         # Export guide curves
         folder_path = os.path.abspath("{0}_dxf_files".format(airplane_name))
-        file_path = os.path.join(folder_path, "{0}{1}_{2}_GC".format(file_tag, airplane_name, self.name) )
+        file_path = folder_path + "/{0}{1}_{2}_GC".format(file_tag, airplane_name, self.name)
         dxf(file_path, X_GC, Y_GC, Z_GC,geometry="spline")
 
         # Add section resolution to guide curve indices
@@ -2096,5 +2104,5 @@ class WingSegment:
                 k += 1
         
         # create airfoils DXF file
-        file_path = os.path.join(folder_path, "{0}{1}_{2}_AF".format(file_tag, airplane_name, self.name) )
+        file_path = folder_path + "/{0}{1}_{2}_AF".format(file_tag, airplane_name, self.name)
         dxf(file_path, X_AF, Y_AF, Z_AF, geometry="spline")
