@@ -16,6 +16,8 @@ J. T. Reid and D. F. Hunsaker, "A General Approach to Lifting-Line Theory, Appli
 ## Documentation
 Documentation on the original MachUpX can be found at [ReadTheDocs](https://machupx.readthedocs.io). Please refer to the documentation for instructions on installation, etc. Specific help with package functions can also be found in the docstrings.
 
+Note that MachUpHydro currently only supports working in SI units. Imperial units are not supported.
+
 Additional input options are available with MachUpHydro for the "scene" class under the "scene" heading. These are:
 - "surface_effect_conditions" : dictionary containing options for controlling how surface effects are handled.
   - "has_free_surface" : boolean, whether or not to include a surface effect boundary condition in the simulation. Defaults to False.
